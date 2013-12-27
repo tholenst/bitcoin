@@ -72,7 +72,7 @@ void CTxMemPool::AddTransactionsUpdated(unsigned int n)
 bool CTxMemPool::addUnchecked(const uint256& hash, const CTxMemPoolEntry &entry)
 {
     // Add to memory pool without checking anything.
-    // Used by main.cpp AcceptToMemoryPool(), which DOES do
+    // Used by main.cpp add(), which DOES do
     // all the appropriate checks.
     LOCK(cs);
     {
@@ -209,39 +209,39 @@ bool CCoinsViewMemPool::HaveCoins(const uint256 &txid) {
     return mempool.exists(txid) || base->HaveCoins(txid);
 }
 
-bool AcceptToMemoryPool(CTxMemPool& pool, CValidationState &state, const CTransaction &tx, bool fLimitFree,
-                        bool* pfMissingInputs, bool fRejectInsaneFee)
+bool CTxMemPool::add(CValidationState &state, const CTransaction &tx, bool fLimitFree,
+                     bool* pfMissingInputs, bool fRejectInsaneFee)
 {
     if (pfMissingInputs)
         *pfMissingInputs = false;
 
     if (!CheckTransaction(tx, state))
-        return error("AcceptToMemoryPool: : CheckTransaction failed");
+        return error("mempool.add : CheckTransaction failed");
 
     // Coinbase is only valid in a block, not as a loose transaction
     if (tx.IsCoinBase())
-        return state.DoS(100, error("AcceptToMemoryPool: : coinbase as individual tx"),
+        return state.DoS(100, error("mempool.add : coinbase as individual tx"),
                          REJECT_INVALID, "coinbase");
 
     // Rather not work on nonstandard transactions (unless -testnet/-regtest)
     string reason;
     if (Params().NetworkID() == CChainParams::MAIN && !IsStandardTx(tx, reason))
         return state.DoS(0,
-                         error("AcceptToMemoryPool : nonstandard transaction: %s", reason.c_str()),
+                         error("mempool.add : nonstandard transaction: %s", reason.c_str()),
                          REJECT_NONSTANDARD, reason);
 
     // is it already in the memory pool?
     uint256 hash = tx.GetHash();
-    if (pool.exists(hash))
+    if (this->exists(hash))
         return false;
 
     // Check for conflicts with in-memory transactions
     {
-    LOCK(pool.cs); // protect pool.mapNextTx
+    LOCK(this->cs); // protect this->mapNextTx
     for (unsigned int i = 0; i < tx.vin.size(); i++)
     {
         COutPoint outpoint = tx.vin[i].prevout;
-        if (pool.mapNextTx.count(outpoint))
+        if (this->mapNextTx.count(outpoint))
         {
             // Disable replacement feature for now
             return false;
@@ -254,8 +254,8 @@ bool AcceptToMemoryPool(CTxMemPool& pool, CValidationState &state, const CTransa
         CCoinsViewCache view(dummy);
 
         {
-        LOCK(pool.cs);
-        CCoinsViewMemPool viewMemPool(*pcoinsTip, pool);
+        LOCK(this->cs);
+        CCoinsViewMemPool viewMemPool(*pcoinsTip, *this);
         view.SetBackend(viewMemPool);
 
         // do we already have it?
@@ -275,7 +275,7 @@ bool AcceptToMemoryPool(CTxMemPool& pool, CValidationState &state, const CTransa
 
         // are the actual inputs available?
         if (!view.HaveInputs(tx))
-            return state.Invalid(error("AcceptToMemoryPool : inputs already spent"),
+            return state.Invalid(error("mempool.add : inputs already spent"),
                                  REJECT_DUPLICATE, "inputs spent");
 
         // Bring the best block into scope
@@ -287,7 +287,7 @@ bool AcceptToMemoryPool(CTxMemPool& pool, CValidationState &state, const CTransa
 
         // Check for non-standard pay-to-script-hash in inputs
         if (Params().NetworkID() == CChainParams::MAIN && !AreInputsStandard(tx, view))
-            return error("AcceptToMemoryPool: : nonstandard transaction input");
+            return error("mempool.add : nonstandard transaction input");
 
         // Note: if you modify this code to accept non-standard transactions, then
         // you should add code here to check that the transaction does a
@@ -304,7 +304,7 @@ bool AcceptToMemoryPool(CTxMemPool& pool, CValidationState &state, const CTransa
         // Don't accept it if it can't get into a block
         int64_t txMinFee = GetMinFee(tx, nSize, true, GMF_RELAY);
         if (fLimitFree && nFees < txMinFee)
-            return state.DoS(0, error("AcceptToMemoryPool : not enough fees %s, %"PRId64" < %"PRId64,
+            return state.DoS(0, error("mempool.add : not enough fees %s, %"PRId64" < %"PRId64,
                                       hash.ToString().c_str(), nFees, txMinFee),
                              REJECT_INSUFFICIENTFEE, "insufficient fee");
 
@@ -326,14 +326,14 @@ bool AcceptToMemoryPool(CTxMemPool& pool, CValidationState &state, const CTransa
             // -limitfreerelay unit is thousand-bytes-per-minute
             // At default rate it would take over a month to fill 1GB
             if (dFreeCount >= GetArg("-limitfreerelay", 15)*10*1000)
-                return state.DoS(0, error("AcceptToMemoryPool : free transaction rejected by rate limiter"),
+                return state.DoS(0, error("mempool.add : free transaction rejected by rate limiter"),
                                  REJECT_INSUFFICIENTFEE, "insufficient priority");
             LogPrint("mempool", "Rate limit dFreeCount: %g => %g\n", dFreeCount, dFreeCount+nSize);
             dFreeCount += nSize;
         }
 
         if (fRejectInsaneFee && nFees > CTransaction::nMinRelayTxFee * 10000)
-            return error("AcceptToMemoryPool: : insane fees %s, %"PRId64" > %"PRId64,
+            return error("mempool.add : insane fees %s, %"PRId64" > %"PRId64,
                          hash.ToString().c_str(),
                          nFees, CTransaction::nMinRelayTxFee * 10000);
 
@@ -341,13 +341,13 @@ bool AcceptToMemoryPool(CTxMemPool& pool, CValidationState &state, const CTransa
         // This is done last to help prevent CPU exhaustion denial-of-service attacks.
         if (!CheckInputs(tx, state, view, true, SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_STRICTENC))
         {
-            return error("AcceptToMemoryPool: : ConnectInputs failed %s", hash.ToString().c_str());
+            return error("mempool.add : ConnectInputs failed %s", hash.ToString().c_str());
         }
         // Store transaction in memory
-        pool.addUnchecked(hash, entry);
+        this->addUnchecked(hash, entry);
     }
 
-    g_signals.SyncTransaction(hash, tx, NULL);
+    SignalSyncTransaction(hash, tx, NULL);
 
     return true;
 }

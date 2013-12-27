@@ -80,8 +80,8 @@ extern CScript COINBASE_FLAGS;
 
 
 
-
 extern CCriticalSection cs_main;
+class CTxMemPool;
 extern CTxMemPool mempool;
 extern std::map<uint256, CBlockIndex*> mapBlockIndex;
 extern uint64_t nLastBlockTx;
@@ -183,9 +183,6 @@ bool AbortNode(const std::string &msg);
 /** Get statistics from node state */
 bool GetNodeStateStats(NodeId nodeid, CNodeStateStats &stats);
 
-/** (try to) add transaction to memory pool **/
-bool AcceptToMemoryPool(CTxMemPool& pool, CValidationState &state, const CTransaction &tx, bool fLimitFree,
-                        bool* pfMissingInputs, bool fRejectInsaneFee=false);
 
 
 

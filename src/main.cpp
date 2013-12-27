@@ -115,7 +115,7 @@ struct CMainSignals {
 }
 
 void RegisterWallet(CWalletInterface* pwalletIn) {
-    g_signals.SyncTransaction.connect(boost::bind(&CWalletInterface::SyncTransaction, pwalletIn, _1, _2, _3));
+    mempool.SignalSyncTransaction.connect(boost::bind(&CWalletInterface::SyncTransaction, pwalletIn, _1, _2, _3));
     g_signals.EraseTransaction.connect(boost::bind(&CWalletInterface::EraseFromWallet, pwalletIn, _1));
     g_signals.UpdatedTransaction.connect(boost::bind(&CWalletInterface::UpdatedTransaction, pwalletIn, _1));
     g_signals.SetBestChain.connect(boost::bind(&CWalletInterface::SetBestChain, pwalletIn, _1));
@@ -129,7 +129,8 @@ void UnregisterWallet(CWalletInterface* pwalletIn) {
     g_signals.SetBestChain.disconnect(boost::bind(&CWalletInterface::SetBestChain, pwalletIn, _1));
     g_signals.UpdatedTransaction.disconnect(boost::bind(&CWalletInterface::UpdatedTransaction, pwalletIn, _1));
     g_signals.EraseTransaction.disconnect(boost::bind(&CWalletInterface::EraseFromWallet, pwalletIn, _1));
-    g_signals.SyncTransaction.disconnect(boost::bind(&CWalletInterface::SyncTransaction, pwalletIn, _1, _2, _3));
+    mempool.SignalSyncTransaction.disconnect(boost::bind(&CWalletInterface::SyncTransaction, pwalletIn, _1, _2, _3));
+
 }
 
 void UnregisterAllWallets() {
@@ -138,7 +139,7 @@ void UnregisterAllWallets() {
     g_signals.SetBestChain.disconnect_all_slots();
     g_signals.UpdatedTransaction.disconnect_all_slots();
     g_signals.EraseTransaction.disconnect_all_slots();
-    g_signals.SyncTransaction.disconnect_all_slots();
+    mempool.SignalSyncTransaction.disconnect_all_slots();
 }
 
 void SyncWithWallets(const uint256 &hash, const CTransaction &tx, const CBlock *pblock) {
@@ -709,7 +710,7 @@ int CMerkleTx::GetBlocksToMaturity() const
 bool CMerkleTx::AcceptToMemoryPool(bool fLimitFree)
 {
     CValidationState state;
-    return ::AcceptToMemoryPool(mempool, state, *this, fLimitFree, NULL);
+    return mempool.add(state, *this, fLimitFree, NULL);
 }
 
 
@@ -1439,7 +1440,7 @@ bool ConnectBlock(CBlock& block, CValidationState& state, CBlockIndex* pindex, C
     // can be duplicated to remove the ability to spend the first instance -- even after
     // being sent to another address.
     // See BIP30 and http://r6.ca/blog/20120206T005236Z.html for more information.
-    // This logic is not necessary for memory pool transactions, as AcceptToMemoryPool
+    // This logic is not necessary for memory pool transactions, as mempool.add()
     // already refuses previously-known transaction ids entirely.
     // This rule was originally applied all blocks whose timestamp was after March 15, 2012, 0:00 UTC.
     // Now that the whole chain is irreversibly beyond that time it is applied to all blocks except the
@@ -1694,7 +1695,7 @@ bool SetBestChain(CValidationState &state, CBlockIndex* pindexNew)
     BOOST_FOREACH(CTransaction& tx, vResurrect) {
         // ignore validation errors in resurrected transactions
         CValidationState stateDummy;
-        if (!AcceptToMemoryPool(mempool,stateDummy, tx, false, NULL))
+        if (!mempool.add(stateDummy, tx, false, NULL))
             mempool.remove(tx, true);
     }
 
@@ -3315,7 +3316,7 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv)
 
         bool fMissingInputs = false;
         CValidationState state;
-        if (AcceptToMemoryPool(mempool, state, tx, true, &fMissingInputs))
+        if (mempool.add(state, tx, true, &fMissingInputs))
         {
             mempool.check(pcoinsTip);
             RelayTransaction(tx, inv.hash);
@@ -3324,7 +3325,7 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv)
             vEraseQueue.push_back(inv.hash);
 
 
-            LogPrint("mempool", "AcceptToMemoryPool: %s %s : accepted %s (poolsz %"PRIszu")\n",
+            LogPrint("mempool", "add: %s %s : accepted %s (poolsz %"PRIszu")\n",
                 pfrom->addr.ToString().c_str(), pfrom->cleanSubVer.c_str(),
                 tx.GetHash().ToString().c_str(),
                 mempool.mapTx.size());
@@ -3345,7 +3346,7 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv)
                     // anyone relaying LegitTxX banned)
                     CValidationState stateDummy;
 
-                    if (AcceptToMemoryPool(mempool, stateDummy, orphanTx, true, &fMissingInputs2))
+                    if (mempool.add(stateDummy, orphanTx, true, &fMissingInputs2))
                     {
                         LogPrint("mempool", "   accepted orphan tx %s\n", orphanHash.ToString().c_str());
                         RelayTransaction(orphanTx, orphanHash);

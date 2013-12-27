@@ -4,13 +4,15 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 #ifndef BITCOIN_TXMEMPOOL_H
 #define BITCOIN_TXMEMPOOL_H
-
+#include "main.h"
 #include "coins.h"
 #include "core.h"
 #include "sync.h"
-
+#include <boost/signals2.hpp>
 /** Fake height value used in CCoins to signify they are only in the memory pool (since 0.8) */
 static const unsigned int MEMPOOL_HEIGHT = 0x7FFFFFFF;
+
+class CValidationState;
 
 /*
  * CTxMemPool stores these:
@@ -59,6 +61,8 @@ public:
     mutable CCriticalSection cs;
     std::map<uint256, CTxMemPoolEntry> mapTx;
     std::map<COutPoint, CInPoint> mapNextTx;
+    // called when a single transaction is accepted by mempool.add()
+    boost::signals2::signal<void (const uint256 &, const CTransaction &, const CBlock *)> SignalSyncTransaction;
 
     CTxMemPool();
 
@@ -71,7 +75,6 @@ public:
     void check(CCoinsViewCache *pcoins) const;
     void setSanityCheck(bool _fSanityCheck) { fSanityCheck = _fSanityCheck; }
 
-    bool addUnchecked(const uint256& hash, const CTxMemPoolEntry &entry);
     bool remove(const CTransaction &tx, bool fRecursive = false);
     bool removeConflicts(const CTransaction &tx);
     void clear();
@@ -79,6 +82,10 @@ public:
     void pruneSpent(const uint256& hash, CCoins &coins);
     unsigned int GetTransactionsUpdated() const;
     void AddTransactionsUpdated(unsigned int n);
+
+    bool addUnchecked(const uint256& hash, const CTxMemPoolEntry &entry);
+    bool add(CValidationState &state, const CTransaction &tx, bool fLimitFree,
+             bool* pfMissingInputs, bool fRejectInsaneFee=false);
 
     unsigned long size()
     {
