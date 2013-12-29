@@ -19,7 +19,7 @@ class CValidationState;
  */
 class CTxMemPoolEntry
 {
-private:
+public:
     CTransaction tx;
     int64_t nFee; // Cached to avoid expensive parent-transaction lookups
     size_t nTxSize; // ... and avoid recomputing tx size
@@ -27,18 +27,17 @@ private:
     double dPriority; // Priority when entering the mempool
     unsigned int nHeight; // Chain height when entering the mempool
 
-public:
     CTxMemPoolEntry(const CTransaction& _tx, int64_t _nFee,
                     int64_t _nTime, double _dPriority, unsigned int _nHeight);
-    CTxMemPoolEntry();
     CTxMemPoolEntry(const CTxMemPoolEntry& other);
 
-    const CTransaction& GetTx() const { return this->tx; }
-    double GetPriority(unsigned int currentHeight) const;
     int64_t GetFee() const { return nFee; }
     size_t GetTxSize() const { return nTxSize; }
     int64_t GetTime() const { return nTime; }
     unsigned int GetHeight() const { return nHeight; }
+    CTxMemPoolEntry();
+    const CTransaction& GetTx() const { return this->tx; }
+    double GetPriority(unsigned int currentHeight) const;
 };
 
 /*
@@ -53,19 +52,35 @@ public:
  */
 class CTxMemPool
 {
+    friend class CTxMemPoolEntry;
 private:
     bool fSanityCheck; // Normally false, true if -checkmempool or -regtest
     unsigned int nTransactionsUpdated;
+    std::map<COutPoint, CInPoint> mapNextTx;
 
+
+    void EraseOrphanTx(uint256);
+    void ProcessOrphansAfterAdd(const CTransaction&);
+    bool AddInternal(CValidationState &state, const CTransaction &tx, bool fLimitFree,
+                     bool* pfMissingInputs, bool fRejectInsaneFee);
+public: // NOTE: Should be private, but public for unit tests
+    /* The mempool may cache transactions which are not really part of
+     * the mempool, but may be later. Currently, these are just the
+     * orphans seen, but later it might include double spends.
+     */
+    std::map<uint256, set<uint256> > mapOrphanTransactionsByPrev;
+    std::map<uint256, CTransaction> mapOrphanTransactions;
+    bool AddOrphanTx(const CTransaction&);
+    unsigned int LimitOrphanTxSize(unsigned int);
 public:
     mutable CCriticalSection cs;
     std::map<uint256, CTxMemPoolEntry> mapTx;
-    std::map<COutPoint, CInPoint> mapNextTx;
     // called when a single transaction is accepted by mempool.add()
-    boost::signals2::signal<void (const uint256 &, const CTransaction &, const CBlock *)> SignalSyncTransaction;
 
     CTxMemPool();
-
+    ~CTxMemPool() {
+        mapOrphanTransactions.clear();
+    }
     /*
      * If sanity-checking is turned on, check makes sure the pool is
      * consistent (does not contain two transactions that spend the same inputs,
@@ -85,7 +100,7 @@ public:
 
     bool addUnchecked(const uint256& hash, const CTxMemPoolEntry &entry);
     bool add(CValidationState &state, const CTransaction &tx, bool fLimitFree,
-             bool* pfMissingInputs, bool fRejectInsaneFee=false);
+             bool fCacheIfInputsMissing=false, bool fRejectInsaneFee=false);
 
     unsigned long size()
     {
@@ -93,10 +108,10 @@ public:
         return mapTx.size();
     }
 
-    bool exists(uint256 hash)
+    bool exists(uint256 hash, bool includeOrphans = false)
     {
         LOCK(cs);
-        return (mapTx.count(hash) != 0);
+        return (mapTx.count(hash) != 0) || (includeOrphans && mapOrphanTransactions.count(hash));
     }
 
     bool lookup(uint256 hash, CTransaction& result) const;

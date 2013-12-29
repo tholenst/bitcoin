@@ -19,11 +19,7 @@
 #include <boost/test/unit_test.hpp>
 
 // Tests this internal-to-main.cpp method:
-extern bool AddOrphanTx(const CTransaction& tx);
-extern unsigned int LimitOrphanTxSize(unsigned int nMaxOrphans);
 extern void Misbehaving(NodeId nodeid, int howmuch);
-extern std::map<uint256, CTransaction> mapOrphanTransactions;
-extern std::map<uint256, std::set<uint256> > mapOrphanTransactionsByPrev;
 
 CService ip(uint32_t i)
 {
@@ -146,12 +142,12 @@ BOOST_AUTO_TEST_CASE(DoS_checknbits)
     BOOST_CHECK(CheckNBits(firstcheck.second, lastcheck.first+60*60*24*365*4, lastcheck.second, lastcheck.first));
 }
 
-CTransaction RandomOrphan()
+CTransaction RandomOrphan(CTxMemPool& mempool)
 {
     std::map<uint256, CTransaction>::iterator it;
-    it = mapOrphanTransactions.lower_bound(GetRandHash());
-    if (it == mapOrphanTransactions.end())
-        it = mapOrphanTransactions.begin();
+    it = mempool.mapOrphanTransactions.lower_bound(GetRandHash());
+    if (it == mempool.mapOrphanTransactions.end())
+        it = mempool.mapOrphanTransactions.begin();
     return it->second;
 }
 
@@ -161,6 +157,7 @@ BOOST_AUTO_TEST_CASE(DoS_mapOrphans)
     key.MakeNewKey(true);
     CBasicKeyStore keystore;
     keystore.AddKey(key);
+    CTxMemPool mempool;
 
     // 50 orphan transactions:
     for (int i = 0; i < 50; i++)
@@ -174,13 +171,13 @@ BOOST_AUTO_TEST_CASE(DoS_mapOrphans)
         tx.vout[0].nValue = 1*CENT;
         tx.vout[0].scriptPubKey.SetDestination(key.GetPubKey().GetID());
 
-        AddOrphanTx(tx);
+        mempool.AddOrphanTx(tx);
     }
 
     // ... and 50 that depend on other orphans:
     for (int i = 0; i < 50; i++)
     {
-        CTransaction txPrev = RandomOrphan();
+        CTransaction txPrev = RandomOrphan(mempool);
 
         CTransaction tx;
         tx.vin.resize(1);
@@ -191,13 +188,13 @@ BOOST_AUTO_TEST_CASE(DoS_mapOrphans)
         tx.vout[0].scriptPubKey.SetDestination(key.GetPubKey().GetID());
         SignSignature(keystore, txPrev, tx, 0);
 
-        AddOrphanTx(tx);
+        mempool.AddOrphanTx(tx);
     }
 
     // This really-big orphan should be ignored:
     for (int i = 0; i < 10; i++)
     {
-        CTransaction txPrev = RandomOrphan();
+        CTransaction txPrev = RandomOrphan(mempool);
 
         CTransaction tx;
         tx.vout.resize(1);
@@ -215,23 +212,23 @@ BOOST_AUTO_TEST_CASE(DoS_mapOrphans)
         for (unsigned int j = 1; j < tx.vin.size(); j++)
             tx.vin[j].scriptSig = tx.vin[0].scriptSig;
 
-        BOOST_CHECK(!AddOrphanTx(tx));
+        BOOST_CHECK(!mempool.AddOrphanTx(tx));
     }
 
     // Test LimitOrphanTxSize() function:
-    LimitOrphanTxSize(40);
-    BOOST_CHECK(mapOrphanTransactions.size() <= 40);
-    LimitOrphanTxSize(10);
-    BOOST_CHECK(mapOrphanTransactions.size() <= 10);
-    LimitOrphanTxSize(0);
-    BOOST_CHECK(mapOrphanTransactions.empty());
-    BOOST_CHECK(mapOrphanTransactionsByPrev.empty());
+    mempool.LimitOrphanTxSize(40);
+    BOOST_CHECK(mempool.mapOrphanTransactions.size() <= 40);
+    mempool.LimitOrphanTxSize(10);
+    BOOST_CHECK(mempool.mapOrphanTransactions.size() <= 10);
+    mempool.LimitOrphanTxSize(0);
+    BOOST_CHECK(mempool.mapOrphanTransactions.empty());
+    BOOST_CHECK(mempool.mapOrphanTransactionsByPrev.empty());
 }
 
 BOOST_AUTO_TEST_CASE(DoS_checkSig)
 {
     // Test signature caching code (see key.cpp Verify() methods)
-
+    CTxMemPool mempool;
     CKey key;
     key.MakeNewKey(true);
     CBasicKeyStore keystore;
@@ -252,7 +249,7 @@ BOOST_AUTO_TEST_CASE(DoS_checkSig)
         tx.vout[0].nValue = 1*CENT;
         tx.vout[0].scriptPubKey.SetDestination(key.GetPubKey().GetID());
 
-        AddOrphanTx(tx);
+        mempool.AddOrphanTx(tx);
     }
 
     // Create a transaction that depends on orphans:
@@ -312,7 +309,7 @@ BOOST_AUTO_TEST_CASE(DoS_checkSig)
         BOOST_CHECK(VerifySignature(CCoins(orphans[j], MEMPOOL_HEIGHT), tx, j, flags, SIGHASH_ALL));
     mapArgs.erase("-maxsigcachesize");
 
-    LimitOrphanTxSize(0);
+    mempool.LimitOrphanTxSize(0);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

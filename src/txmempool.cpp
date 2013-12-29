@@ -210,9 +210,25 @@ bool CCoinsViewMemPool::HaveCoins(const uint256 &txid) {
 }
 
 bool CTxMemPool::add(CValidationState &state, const CTransaction &tx, bool fLimitFree,
-                     bool* pfMissingInputs, bool fRejectInsaneFee)
+                     bool fCacheIfInputsMissing, bool fRejectInsaneFee)
 {
-    if (pfMissingInputs)
+    bool fMissingInputs = false;
+    bool result;
+    result = AddInternal(state, tx, fLimitFree, &fMissingInputs, fRejectInsaneFee);
+    if (fCacheIfInputsMissing && fMissingInputs) {
+        AddOrphanTx(tx);
+        // DoS prevention: do not allow mapOrphanTransactions to grow unbounded
+        unsigned int nEvicted = LimitOrphanTxSize(MAX_ORPHAN_TRANSACTIONS);
+        if (nEvicted > 0)
+            LogPrint("mempool", "mapOrphan overflow, removed %u tx\n", nEvicted);
+    }
+    return result;
+}
+
+bool CTxMemPool::AddInternal(CValidationState &state, const CTransaction &tx, bool fLimitFree,
+                             bool* pfMissingInputs, bool fRejectInsaneFee)
+{
+    if (pfMissingInputs) 
         *pfMissingInputs = false;
 
     if (!CheckTransaction(tx, state))
@@ -237,16 +253,16 @@ bool CTxMemPool::add(CValidationState &state, const CTransaction &tx, bool fLimi
 
     // Check for conflicts with in-memory transactions
     {
-    LOCK(this->cs); // protect this->mapNextTx
-    for (unsigned int i = 0; i < tx.vin.size(); i++)
-    {
-        COutPoint outpoint = tx.vin[i].prevout;
-        if (this->mapNextTx.count(outpoint))
+        LOCK(this->cs); // protect this->mapNextTx
+        for (unsigned int i = 0; i < tx.vin.size(); i++)
         {
-            // Disable replacement feature for now
-            return false;
+            COutPoint outpoint = tx.vin[i].prevout;
+            if (this->mapNextTx.count(outpoint))
+            {
+                // Disable replacement feature for now
+                return false;
+            }
         }
-    }
     }
 
     {
@@ -254,35 +270,35 @@ bool CTxMemPool::add(CValidationState &state, const CTransaction &tx, bool fLimi
         CCoinsViewCache view(dummy);
 
         {
-        LOCK(this->cs);
-        CCoinsViewMemPool viewMemPool(*pcoinsTip, *this);
-        view.SetBackend(viewMemPool);
+            LOCK(this->cs);
+            CCoinsViewMemPool viewMemPool(*pcoinsTip, *this);
+            view.SetBackend(viewMemPool);
 
-        // do we already have it?
-        if (view.HaveCoins(hash))
-            return false;
-
-        // do all inputs exist?
-        // Note that this does not check for the presence of actual outputs (see the next check for that),
-        // only helps filling in pfMissingInputs (to determine missing vs spent).
-        BOOST_FOREACH(const CTxIn txin, tx.vin) {
-            if (!view.HaveCoins(txin.prevout.hash)) {
-                if (pfMissingInputs)
-                    *pfMissingInputs = true;
+            // do we already have it?
+            if (view.HaveCoins(hash))
                 return false;
+
+            // do all inputs exist?
+            // Note that this does not check for the presence of actual outputs (see the next check for that),
+            // only helps filling in pfMissingInputs (to determine missing vs spent).
+            BOOST_FOREACH(const CTxIn txin, tx.vin) {
+                if (!view.HaveCoins(txin.prevout.hash)) {
+                    if (pfMissingInputs)
+                        *pfMissingInputs = true;
+                    return false;
+                }
             }
-        }
 
-        // are the actual inputs available?
-        if (!view.HaveInputs(tx))
-            return state.Invalid(error("mempool.add : inputs already spent"),
-                                 REJECT_DUPLICATE, "inputs spent");
+            // are the actual inputs available?
+            if (!view.HaveInputs(tx))
+                return state.Invalid(error("mempool.add : inputs already spent"),
+                                     REJECT_DUPLICATE, "inputs spent");
 
-        // Bring the best block into scope
-        view.GetBestBlock();
+            // Bring the best block into scope
+            view.GetBestBlock();
 
-        // we have all inputs cached now, so switch back to dummy, so we don't need to keep lock on mempool
-        view.SetBackend(dummy);
+            // we have all inputs cached now, so switch back to dummy, so we don't need to keep lock on mempool
+            view.SetBackend(dummy);
         }
 
         // Check for non-standard pay-to-script-hash in inputs
@@ -346,8 +362,118 @@ bool CTxMemPool::add(CValidationState &state, const CTransaction &tx, bool fLimi
         // Store transaction in memory
         this->addUnchecked(hash, entry);
     }
-
-    SignalSyncTransaction(hash, tx, NULL);
+    
+    ::g_signals.SyncTransaction(hash, tx, NULL);
 
     return true;
 }
+
+//////////////////////////////////////////////////////////////////////////////
+//
+// mapOrphanTransactions
+//
+
+bool CTxMemPool::AddOrphanTx(const CTransaction& tx)
+{
+    uint256 hash = tx.GetHash();
+    if (mapOrphanTransactions.count(hash))
+        return false;
+
+    // Ignore big transactions, to avoid a
+    // send-big-orphans memory exhaustion attack. If a peer has a legitimate
+    // large transaction with a missing parent then we assume
+    // it will rebroadcast it later, after the parent transaction(s)
+    // have been mined or received.
+    // 10,000 orphans, each of which is at most 5,000 bytes big is
+    // at most 500 megabytes of orphans:
+    unsigned int sz = tx.GetSerializeSize(SER_NETWORK, CTransaction::CURRENT_VERSION);
+    if (sz > 5000)
+    {
+        LogPrint("mempool", "ignoring large orphan tx (size: %u, hash: %s)\n", sz, hash.ToString().c_str());
+        return false;
+    }
+
+    mapOrphanTransactions[hash] = tx;
+    BOOST_FOREACH(const CTxIn& txin, tx.vin)
+        mapOrphanTransactionsByPrev[txin.prevout.hash].insert(hash);
+
+    LogPrint("mempool", "stored orphan tx %s (mapsz %"PRIszu")\n", hash.ToString().c_str(),
+             mapOrphanTransactions.size());
+    return true;
+}
+
+void CTxMemPool::EraseOrphanTx(uint256 hash)
+{
+    if (!mapOrphanTransactions.count(hash))
+        return;
+    const CTransaction& tx = mapOrphanTransactions[hash];
+    BOOST_FOREACH(const CTxIn& txin, tx.vin)
+    {
+        mapOrphanTransactionsByPrev[txin.prevout.hash].erase(hash);
+        if (mapOrphanTransactionsByPrev[txin.prevout.hash].empty())
+            mapOrphanTransactionsByPrev.erase(txin.prevout.hash);
+    }
+    mapOrphanTransactions.erase(hash);
+}
+
+unsigned int CTxMemPool::LimitOrphanTxSize(unsigned int nMaxOrphans)
+{
+    unsigned int nEvicted = 0;
+    while (mapOrphanTransactions.size() > nMaxOrphans)
+    {
+        // Evict a random orphan:
+        uint256 randomhash = GetRandHash();
+        map<uint256, CTransaction>::iterator it = mapOrphanTransactions.lower_bound(randomhash);
+        if (it == mapOrphanTransactions.end())
+            it = mapOrphanTransactions.begin();
+        EraseOrphanTx(it->first);
+        ++nEvicted;
+    }
+    return nEvicted;
+}
+
+void CTxMemPool::ProcessOrphansAfterAdd(const CTransaction& tx) {
+    vector<uint256> vWorkQueue;
+    vector<uint256> vEraseQueue;
+    vWorkQueue.push_back(tx.GetHash());
+    vEraseQueue.push_back(tx.GetHash());
+    
+    // Recursively process any orphan transactions that depended on this one
+    for (unsigned int i = 0; i < vWorkQueue.size(); i++)
+    {
+        uint256 hashPrev = vWorkQueue[i];
+        for (set<uint256>::iterator mi = mapOrphanTransactionsByPrev[hashPrev].begin();
+             mi != mapOrphanTransactionsByPrev[hashPrev].end();
+             ++mi)
+        {
+            const uint256& orphanHash = *mi;
+            const CTransaction& orphanTx = mapOrphanTransactions[orphanHash];
+            bool fMissingInputs2 = false;
+            // Use a dummy CValidationState so someone can't setup nodes to counter-DoS based on orphan
+            // resolution (that is, feeding people an invalid transaction based on LegitTxX in order to get
+            // anyone relaying LegitTxX banned)
+            CValidationState stateDummy;
+            
+            if (mempool.AddInternal(stateDummy, orphanTx, true, &fMissingInputs2, false))
+            {
+                LogPrint("mempool", "   accepted orphan tx %s\n", orphanHash.ToString().c_str());
+                RelayTransaction(orphanTx, orphanHash);
+                mapAlreadyAskedFor.erase(CInv(MSG_TX, orphanHash));
+                vWorkQueue.push_back(orphanHash);
+                vEraseQueue.push_back(orphanHash);
+            }
+            else if (!fMissingInputs2)
+            {
+                // invalid or too-little-fee orphan
+                vEraseQueue.push_back(orphanHash);
+                LogPrint("mempool", "   removed orphan tx %s\n", orphanHash.ToString().c_str());
+            }
+            mempool.check(pcoinsTip);
+        }
+    }
+    
+    BOOST_FOREACH(uint256 hash, vEraseQueue)
+        EraseOrphanTx(hash);
+    
+}
+
