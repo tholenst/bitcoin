@@ -1601,19 +1601,7 @@ bool SetBestChain(CValidationState &state, CBlockIndex* pindexNew)
     // Register new best chain
     chainActive.SetTip(pindexNew);
 
-    // Resurrect memory transactions that were in the disconnected branch
-    BOOST_FOREACH(CTransaction& tx, vResurrect) {
-        // ignore validation errors in resurrected transactions
-        CValidationState stateDummy;
-        if (!mempool.add(stateDummy, tx, false, NULL))
-            mempool.remove(tx, true);
-    }
-
-    // Delete redundant memory transactions that are in the connected branch
-    BOOST_FOREACH(CTransaction& tx, vDelete) {
-        mempool.remove(tx);
-        mempool.removeConflicts(tx);
-    }
+    mempool.blockchainupdate(vDelete,vResurrect);
 
     mempool.check(pcoinsTip);
 

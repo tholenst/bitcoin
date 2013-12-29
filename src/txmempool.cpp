@@ -477,3 +477,19 @@ void CTxMemPool::ProcessOrphansAfterAdd(const CTransaction& tx) {
     
 }
 
+void CTxMemPool::blockchainupdate(std::vector<CTransaction>& vDelete, std::list<CTransaction>& vResurrect) 
+{
+    // Resurrect memory transactions that were in the disconnected branch
+    BOOST_FOREACH(CTransaction& tx, vResurrect) {
+        // ignore validation errors in resurrected transactions
+        CValidationState stateDummy;
+        if (!add(stateDummy, tx, false, NULL))
+            remove(tx, true);
+    }
+    
+    // Delete redundant memory transactions that are in the connected branch
+    BOOST_FOREACH(CTransaction& tx, vDelete) {
+        remove(tx);
+        removeConflicts(tx);
+    }
+}

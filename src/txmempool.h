@@ -97,11 +97,12 @@ public:
     void pruneSpent(const uint256& hash, CCoins &coins);
     unsigned int GetTransactionsUpdated() const;
     void AddTransactionsUpdated(unsigned int n);
-
+    
     bool addUnchecked(const uint256& hash, const CTxMemPoolEntry &entry);
     bool add(CValidationState &state, const CTransaction &tx, bool fLimitFree,
              bool fCacheIfInputsMissing=false, bool fRejectInsaneFee=false);
 
+    void blockchainupdate(std::vector<CTransaction>& vDelete, std::list<CTransaction>& vResurrect);
     unsigned long size()
     {
         LOCK(cs);
